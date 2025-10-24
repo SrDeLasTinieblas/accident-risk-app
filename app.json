@@ -1,10 +1,10 @@
 {
   "expo": {
-    "name": "accident-risk-app",
-    "slug": "accident-risk-app",
+    "name": "alertapp",
+    "slug": "alertapp",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/splash-icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
@@ -12,18 +12,42 @@
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.bytescode.alertapp",
+      "infoPlist": {
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Esta app necesita acceso a tu ubicación para monitorear riesgos de accidentes.",
+        "NSLocationWhenInUseUsageDescription": "Esta app necesita acceso a tu ubicación para monitorear riesgos de accidentes.",
+        "UIBackgroundModes": ["location"]
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true
+      "package": "com.bytescode.alertapp",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Permitir acceso a la ubicación para monitorear riesgos.",
+          "locationAlwaysPermission": "Permitir acceso a la ubicación en segundo plano para monitorear riesgos.",
+          "locationWhenInUsePermission": "Permitir acceso a la ubicación mientras usas la app."
+        }
+      ]
+    ]
   }
 }
