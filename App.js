@@ -9,11 +9,10 @@ import {
   Switch,
   TextInput,
   Modal,
-  Animated,
   Platform,
   StatusBar,
   SafeAreaView,
-  Dimensions,
+  ActivityIndicator,
 } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -21,16 +20,19 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import MapView, { Marker, Circle, Polygon } from 'react-native-maps';
 
 const Tab = createBottomTabNavigator();
-const { width, height } = Dimensions.get('window');
 
-// 🧪 MODO DE PRUEBA - Coordenadas de demo
-const DEMO_MODE = true; // Cambia a false para usar ubicación real
+// 🧪 MODO DE PRUEBA
+const DEMO_MODE = true;
 const DEMO_COORDINATES = {
   latitude: -16.3974773,
   longitude: -71.501184,
 };
+
+// 🔴 URL de tu API para obtener zonas de riesgo
+const API_BASE_URL = 'https://accident-risk-model.onrender.com';
 
 // Configuración de notificaciones
 Notifications.setNotificationHandler({
@@ -43,7 +45,6 @@ Notifications.setNotificationHandler({
 
 // ==================== SERVICIOS ====================
 
-// Servicio de ubicación
 const LocationService = {
   locationSubscription: null,
   
@@ -54,13 +55,11 @@ const LocationService = {
       return;
     }
 
-    // Obtener ubicación inmediatamente
     const location = await Location.getCurrentPositionAsync({
       accuracy: Location.Accuracy.High,
     });
     onUpdate(location);
 
-    // Configurar actualización periódica
     this.locationSubscription = setInterval(async () => {
       const newLocation = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.High,
@@ -77,11 +76,10 @@ const LocationService = {
   },
 };
 
-// Servicio de API
 const APIService = {
   async predictRisk(latitude, longitude, edad, hora, mes) {
     try {
-      const response = await fetch('https://accident-risk-model.onrender.com/predict', {
+      const response = await fetch(`${API_BASE_URL}/predict`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -106,9 +104,99 @@ const APIService = {
       throw error;
     }
   },
+
+  async getRiskZones(minRisk = 0.7) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/risk-zones?min_risk=${minRisk}`);
+      
+      if (!response.ok) {
+        // Si el endpoint no existe, retornar zonas demo
+        console.warn('Endpoint /risk-zones no disponible, usando datos demo');
+        return this.getDemoRiskZones();
+      }
+
+      const data = await response.json();
+      return data.zones || [];
+    } catch (error) {
+      console.error('Error al obtener zonas de riesgo:', error);
+      // Retornar zonas demo si falla
+      return this.getDemoRiskZones();
+    }
+  },
+
+  getDemoRiskZones() {
+    // Zonas de riesgo de demostración alrededor de las coordenadas
+    return [
+      {
+        latitude: -16.3974773,
+        longitude: -71.501184,
+        risk_score: 0.95,
+        radius: 150,
+        accident_count: 12
+      },
+      {
+        latitude: -16.3980,
+        longitude: -71.5020,
+        risk_score: 0.85,
+        radius: 120,
+        accident_count: 8
+      },
+      {
+        latitude: -16.3965,
+        longitude: -71.5005,
+        risk_score: 0.78,
+        radius: 100,
+        accident_count: 5
+      },
+      {
+        latitude: -16.3990,
+        longitude: -71.5000,
+        risk_score: 0.72,
+        radius: 80,
+        accident_count: 4
+      }
+    ];
+  },
+
+  // Calcular distancia entre dos puntos (Haversine)
+  calculateDistance(lat1, lon1, lat2, lon2) {
+    const R = 6371e3; // Radio de la Tierra en metros
+    const φ1 = lat1 * Math.PI / 180;
+    const φ2 = lat2 * Math.PI / 180;
+    const Δφ = (lat2 - lat1) * Math.PI / 180;
+    const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+              Math.cos(φ1) * Math.cos(φ2) *
+              Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+    return R * c; // Distancia en metros
+  },
+
+  checkNearbyRiskZones(latitude, longitude, riskZones, alertDistance = 200) {
+    const nearbyZones = [];
+    
+    for (const zone of riskZones) {
+      const distance = this.calculateDistance(
+        latitude,
+        longitude,
+        zone.latitude,
+        zone.longitude
+      );
+      
+      if (distance <= alertDistance) {
+        nearbyZones.push({
+          ...zone,
+          distance: Math.round(distance)
+        });
+      }
+    }
+    
+    return nearbyZones.sort((a, b) => b.risk_score - a.risk_score);
+  }
 };
 
-// Servicio de almacenamiento
 const StorageService = {
   async saveAlert(alert) {
     try {
@@ -153,6 +241,7 @@ const StorageService = {
         interval: 5,
         notificationsEnabled: true,
         edad: 30,
+        alertDistance: 200, // metros
       };
     } catch (error) {
       console.error('Error al obtener configuración:', error);
@@ -160,116 +249,182 @@ const StorageService = {
         interval: 5,
         notificationsEnabled: true,
         edad: 30,
+        alertDistance: 200,
       };
     }
   },
+
+  async saveRiskZones(zones) {
+    try {
+      await AsyncStorage.setItem('riskZones', JSON.stringify(zones));
+    } catch (error) {
+      console.error('Error al guardar zonas de riesgo:', error);
+    }
+  },
+
+  async getRiskZones() {
+    try {
+      const zones = await AsyncStorage.getItem('riskZones');
+      return zones ? JSON.parse(zones) : null;
+    } catch (error) {
+      console.error('Error al obtener zonas de riesgo:', error);
+      return null;
+    }
+  }
 };
 
-// ==================== COMPONENTE DE MAPA PERSONALIZADO ====================
+// ==================== COMPONENTE DE MAPA ====================
 
-function CustomMapView({ location, riskData }) {
-  const pulseAnim = useRef(new Animated.Value(1)).current;
+function CustomMapView({ location, riskZones, onZoneAlert }) {
+  const mapRef = useRef(null);
+  const [region, setRegion] = useState(null);
+  const [nearbyZone, setNearbyZone] = useState(null);
+
+  const latitude = location?.coords?.latitude;
+  const longitude = location?.coords?.longitude;
 
   useEffect(() => {
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, {
-          toValue: 1.3,
-          duration: 1000,
-          useNativeDriver: true,
-        }),
-        Animated.timing(pulseAnim, {
-          toValue: 1,
-          duration: 1000,
-          useNativeDriver: true,
-        }),
-      ])
-    ).start();
-  }, []);
+    if (latitude && longitude) {
+      const newRegion = {
+        latitude,
+        longitude,
+        latitudeDelta: 0.01,
+        longitudeDelta: 0.01,
+      };
+      setRegion(newRegion);
+      
+      if (mapRef.current) {
+        mapRef.current.animateToRegion(newRegion, 1000);
+      }
 
-  const getRiskColor = () => {
-    if (!riskData) return '#4CAF50';
-    switch (riskData.riskLevel) {
-      case 'Alto':
-        return '#F44336';
-      case 'Medio':
-        return '#FF9800';
-      default:
-        return '#4CAF50';
+      // Verificar si está cerca de alguna zona de riesgo
+      if (riskZones && riskZones.length > 0) {
+        const nearby = APIService.checkNearbyRiskZones(latitude, longitude, riskZones, 200);
+        if (nearby.length > 0) {
+          setNearbyZone(nearby[0]);
+          if (onZoneAlert) {
+            onZoneAlert(nearby[0]);
+          }
+        } else {
+          setNearbyZone(null);
+        }
+      }
     }
-  };
+  }, [latitude, longitude, riskZones]);
 
-  const openInMaps = () => {
-    const url = Platform.select({
-      ios: `maps:0,0?q=${location.coords.latitude},${location.coords.longitude}`,
-      android: `geo:0,0?q=${location.coords.latitude},${location.coords.longitude}`,
-    });
-    Alert.alert(
-      'Abrir en Mapas',
-      '¿Deseas ver tu ubicación en la aplicación de mapas?',
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        { text: 'Abrir', onPress: () => Linking.openURL(url) },
-      ]
+  if (!latitude || !longitude || !region) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#FF6B6B" />
+        <Text style={styles.loadingText}>Cargando mapa...</Text>
+      </View>
     );
+  }
+
+  const getRiskColor = (riskScore) => {
+    if (riskScore >= 0.8) return '#F44336'; // Alto
+    if (riskScore >= 0.6) return '#FF9800'; // Medio
+    return '#FFC107'; // Bajo-Medio
   };
 
   return (
-    <View style={styles.customMapContainer}>
-      {/* Círculos de riesgo animados */}
-      <Animated.View
-        style={[
-          styles.riskCircle,
-          {
-            backgroundColor: `${getRiskColor()}20`,
-            borderColor: getRiskColor(),
-            transform: [{ scale: pulseAnim }],
-          },
-        ]}
-      />
-      <Animated.View
-        style={[
-          styles.riskCircleInner,
-          {
-            backgroundColor: `${getRiskColor()}40`,
-            borderColor: getRiskColor(),
-          },
-        ]}
-      />
-
-      {/* Marcador central */}
-      <View style={[styles.locationMarker, { backgroundColor: getRiskColor() }]}>
-        <Ionicons name="location" size={40} color="#FFF" />
-      </View>
-
-      {/* Grid de fondo */}
-      <View style={styles.gridOverlay}>
-        {[...Array(10)].map((_, i) => (
-          <View key={`h-${i}`} style={styles.gridLineHorizontal} />
+    <View style={styles.mapContainer}>
+      <MapView
+        ref={mapRef}
+        style={styles.map}
+        initialRegion={region}
+        showsUserLocation={!DEMO_MODE}
+        showsMyLocationButton={!DEMO_MODE}
+        showsCompass={true}
+        showsScale={true}
+        zoomEnabled={true}
+        scrollEnabled={true}
+        pitchEnabled={true}
+        rotateEnabled={true}
+      >
+        {/* Zonas de riesgo históricas */}
+        {riskZones && riskZones.map((zone, index) => (
+          <React.Fragment key={`zone-${index}`}>
+            <Circle
+              center={{ latitude: zone.latitude, longitude: zone.longitude }}
+              radius={zone.radius || 100}
+              fillColor={getRiskColor(zone.risk_score) + '40'}
+              strokeColor={getRiskColor(zone.risk_score)}
+              strokeWidth={2}
+            />
+            <Marker
+              coordinate={{ latitude: zone.latitude, longitude: zone.longitude }}
+              anchor={{ x: 0.5, y: 0.5 }}
+            >
+              <View style={[styles.riskMarker, { backgroundColor: getRiskColor(zone.risk_score) }]}>
+                <Ionicons name="warning" size={16} color="#FFF" />
+                <Text style={styles.riskMarkerText}>
+                  {(zone.risk_score * 100).toFixed(0)}%
+                </Text>
+              </View>
+            </Marker>
+          </React.Fragment>
         ))}
-        {[...Array(10)].map((_, i) => (
-          <View key={`v-${i}`} style={styles.gridLineVertical} />
-        ))}
-      </View>
 
-      {/* Brújula */}
-      <View style={styles.compassContainer}>
-        <Ionicons name="navigate" size={24} color="#FF6B6B" />
-        <Text style={styles.compassText}>N</Text>
-      </View>
+        {/* Marcador de ubicación actual */}
+        <Marker
+          coordinate={{ latitude, longitude }}
+          title="Tu ubicación"
+          description={nearbyZone ? `⚠️ Zona de riesgo a ${nearbyZone.distance}m` : 'Zona segura'}
+        >
+          <View style={[styles.customMarker, { 
+            backgroundColor: nearbyZone ? '#F44336' : '#4CAF50' 
+          }]}>
+            <Ionicons name="person" size={24} color="#FFF" />
+          </View>
+        </Marker>
 
-      {/* Botón para abrir en mapas */}
-      <TouchableOpacity style={styles.openMapButton} onPress={openInMaps}>
-        <Ionicons name="map-outline" size={20} color="#FFF" />
-        <Text style={styles.openMapText}>Ver en Mapa</Text>
-      </TouchableOpacity>
+        {/* Círculo de proximidad alrededor del usuario */}
+        <Circle
+          center={{ latitude, longitude }}
+          radius={200}
+          fillColor="rgba(33, 150, 243, 0.1)"
+          strokeColor="#2196F3"
+          strokeWidth={1}
+          lineDashPattern={[5, 5]}
+        />
+      </MapView>
 
-      {/* Indicadores de dirección */}
-      <View style={styles.directionsContainer}>
-        <Text style={styles.directionLabel}>Norte</Text>
-        <Text style={[styles.directionLabel, styles.directionRight]}>Este</Text>
-        <Text style={[styles.directionLabel, styles.directionBottom]}>Sur</Text>
-        <Text style={[styles.directionLabel, styles.directionLeft]}>Oeste</Text>
+      {/* Banner de proximidad */}
+      {nearbyZone && (
+        <View style={styles.proximityBanner}>
+          <Ionicons name="warning" size={20} color="#FFF" />
+          <View style={styles.proximityInfo}>
+            <Text style={styles.proximityTitle}>
+              ⚠️ Zona de Riesgo Cercana
+            </Text>
+            <Text style={styles.proximityText}>
+              A {nearbyZone.distance}m - Riesgo: {(nearbyZone.risk_score * 100).toFixed(0)}%
+            </Text>
+            {nearbyZone.accident_count && (
+              <Text style={styles.proximitySubtext}>
+                {nearbyZone.accident_count} accidentes históricos
+              </Text>
+            )}
+          </View>
+        </View>
+      )}
+
+      {/* Leyenda del mapa */}
+      <View style={styles.mapLegend}>
+        <Text style={styles.legendTitle}>Zonas de Riesgo</Text>
+        <View style={styles.legendItem}>
+          <View style={[styles.legendDot, { backgroundColor: '#F44336' }]} />
+          <Text style={styles.legendText}>Alto (&gt;80%)</Text>
+        </View>
+        <View style={styles.legendItem}>
+          <View style={[styles.legendDot, { backgroundColor: '#FF9800' }]} />
+          <Text style={styles.legendText}>Medio (60-80%)</Text>
+        </View>
+        <View style={styles.legendItem}>
+          <View style={[styles.legendDot, { backgroundColor: '#FFC107' }]} />
+          <Text style={styles.legendText}>Bajo (&lt;60%)</Text>
+        </View>
       </View>
     </View>
   );
@@ -279,13 +434,25 @@ function CustomMapView({ location, riskData }) {
 
 function MapScreen() {
   const [location, setLocation] = useState(null);
-  const [riskData, setRiskData] = useState(null);
+  const [riskZones, setRiskZones] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [settings, setSettings] = useState({ interval: 5, edad: 30, notificationsEnabled: true });
+  const [loadingZones, setLoadingZones] = useState(true);
+  const [settings, setSettings] = useState({ 
+    interval: 5, 
+    edad: 30, 
+    notificationsEnabled: true,
+    alertDistance: 200 
+  });
   const [lastUpdate, setLastUpdate] = useState(null);
+  const [stats, setStats] = useState({
+    totalZones: 0,
+    nearbyZones: 0,
+    highRiskZones: 0
+  });
 
   useEffect(() => {
     loadSettings();
+    loadRiskZones();
     initializeLocation();
 
     return () => {
@@ -298,10 +465,46 @@ function MapScreen() {
     setSettings(savedSettings);
   };
 
+  const loadRiskZones = async () => {
+    try {
+      setLoadingZones(true);
+      
+      // Intentar cargar desde caché primero
+      const cachedZones = await StorageService.getRiskZones();
+      
+      if (cachedZones && cachedZones.length > 0) {
+        setRiskZones(cachedZones);
+        updateStats(cachedZones);
+      }
+
+      // Cargar zonas actualizadas de la API
+      const zones = await APIService.getRiskZones(0.7);
+      setRiskZones(zones);
+      updateStats(zones);
+      
+      // Guardar en caché
+      await StorageService.saveRiskZones(zones);
+      
+    } catch (error) {
+      console.error('Error al cargar zonas de riesgo:', error);
+      Alert.alert('Info', 'Usando zonas de riesgo en caché');
+    } finally {
+      setLoadingZones(false);
+    }
+  };
+
+  const updateStats = (zones) => {
+    const highRisk = zones.filter(z => z.risk_score >= 0.8).length;
+    setStats({
+      totalZones: zones.length,
+      nearbyZones: 0,
+      highRiskZones: highRisk
+    });
+  };
+
   const initializeLocation = async () => {
     try {
       if (DEMO_MODE) {
-        // 🧪 Usar coordenadas de demostración
         const demoLocation = {
           coords: {
             latitude: DEMO_COORDINATES.latitude,
@@ -315,21 +518,28 @@ function MapScreen() {
           timestamp: Date.now(),
         };
         
-        // Actualizar inmediatamente con ubicación demo
         handleLocationUpdate(demoLocation);
         
-        // Configurar actualizaciones periódicas con ubicación demo
         const intervalId = setInterval(() => {
+          const randomLat = DEMO_COORDINATES.latitude + (Math.random() - 0.5) * 0.002;
+          const randomLon = DEMO_COORDINATES.longitude + (Math.random() - 0.5) * 0.002;
+          
           handleLocationUpdate({
-            ...demoLocation,
+            coords: {
+              latitude: randomLat,
+              longitude: randomLon,
+              altitude: 0,
+              accuracy: 10,
+              altitudeAccuracy: 10,
+              heading: 0,
+              speed: 0,
+            },
             timestamp: Date.now(),
           });
         }, settings.interval * 60 * 1000);
         
-        // Guardar referencia para poder detenerlo
         LocationService.locationSubscription = intervalId;
       } else {
-        // Usar ubicación real
         LocationService.startTracking(settings.interval, handleLocationUpdate);
       }
     } catch (error) {
@@ -342,82 +552,82 @@ function MapScreen() {
     setLocation(newLocation);
     setLoading(false);
     setLastUpdate(new Date());
+  };
+
+  const handleZoneAlert = async (zone) => {
+    if (!settings.notificationsEnabled) return;
+
+    // Evitar múltiples alertas de la misma zona
+    const lastAlert = await AsyncStorage.getItem('lastZoneAlert');
+    const now = Date.now();
     
-    const now = new Date();
-    const hora = now.getHours();
-    const mes = now.getMonth() + 1;
-
-    try {
-      const risk = await APIService.predictRisk(
-        newLocation.coords.latitude,
-        newLocation.coords.longitude,
-        settings.edad,
-        hora,
-        mes
-      );
-
-      setRiskData(risk);
-
-      const alert = {
-        id: Date.now().toString(),
-        timestamp: new Date().toISOString(),
-        latitude: risk.latitude,
-        longitude: risk.longitude,
-        riskLevel: risk.riskLevel,
-        probability: risk.probability,
-        mensaje: risk.mensaje,
-      };
-
-      await StorageService.saveAlert(alert);
-
-      if (risk.riskLevel === 'Alto' && settings.notificationsEnabled) {
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title: '⚠️ Alerta de Riesgo Alto',
-            body: risk.mensaje,
-            sound: true,
-          },
-          trigger: null,
-        });
+    if (lastAlert) {
+      const { zoneId, timestamp } = JSON.parse(lastAlert);
+      // Si es la misma zona y han pasado menos de 5 minutos, no alertar
+      if (zoneId === `${zone.latitude}-${zone.longitude}` && (now - timestamp) < 300000) {
+        return;
       }
-    } catch (error) {
-      console.error('Error al obtener predicción:', error);
-      Alert.alert('Error', 'No se pudo conectar con el servidor');
     }
+
+    // Guardar alerta
+    await AsyncStorage.setItem('lastZoneAlert', JSON.stringify({
+      zoneId: `${zone.latitude}-${zone.longitude}`,
+      timestamp: now
+    }));
+
+    // Enviar notificación
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: '⚠️ Advertencia: Zona de Riesgo',
+        body: `Estás a ${zone.distance}m de una zona con ${(zone.risk_score * 100).toFixed(0)}% de riesgo de accidentes. ${zone.accident_count ? `${zone.accident_count} accidentes históricos.` : ''} ¡Conduce con precaución!`,
+        sound: true,
+        data: { zone },
+      },
+      trigger: null,
+    });
+
+    // Guardar en historial
+    const alert = {
+      id: Date.now().toString(),
+      timestamp: new Date().toISOString(),
+      latitude: zone.latitude,
+      longitude: zone.longitude,
+      riskLevel: zone.risk_score >= 0.8 ? 'Alto' : 'Medio',
+      probability: zone.risk_score,
+      mensaje: `Zona de riesgo detectada a ${zone.distance}m`,
+      accident_count: zone.accident_count
+    };
+
+    await StorageService.saveAlert(alert);
   };
 
-  const getRiskColor = () => {
-    if (!riskData) return '#4CAF50';
-    switch (riskData.riskLevel) {
-      case 'Alto':
-        return '#F44336';
-      case 'Medio':
-        return '#FF9800';
-      default:
-        return '#4CAF50';
-    }
-  };
-
-  const refreshLocation = () => {
+  const refreshAll = () => {
     setLoading(true);
     LocationService.stopTracking();
+    loadRiskZones();
     initializeLocation();
   };
 
-  if (loading || !location) {
+  if (loading) {
     return (
       <View style={styles.loadingContainer}>
         <Ionicons name="location" size={60} color="#FF6B6B" />
         <Text style={styles.loadingText}>Obteniendo ubicación...</Text>
+        {loadingZones && (
+          <Text style={styles.loadingSubtext}>Cargando zonas de riesgo...</Text>
+        )}
       </View>
     );
   }
 
   return (
     <View style={styles.container}>
-      <CustomMapView location={location} riskData={riskData} />
+      <CustomMapView 
+        location={location} 
+        riskZones={riskZones}
+        onZoneAlert={handleZoneAlert}
+      />
 
-      {/* Banner de modo demo */}
       {DEMO_MODE && (
         <View style={styles.demoBanner}>
           <Ionicons name="flask" size={16} color="#FFF" />
@@ -425,54 +635,38 @@ function MapScreen() {
         </View>
       )}
 
-      {/* Panel de información */}
       <View style={styles.infoPanel}>
-        <View style={styles.riskBadge}>
-          <Ionicons
-            name={riskData?.riskLevel === 'Alto' ? 'warning' : riskData?.riskLevel === 'Medio' ? 'alert-circle' : 'checkmark-circle'}
-            size={24}
-            color={getRiskColor()}
-          />
-          <Text style={[styles.riskText, { color: getRiskColor() }]}>
-            {riskData?.riskLevel || 'Calculando...'}
-          </Text>
+        <View style={styles.statsRow}>
+          <View style={styles.statCard}>
+            <Ionicons name="map-outline" size={20} color="#FF6B6B" />
+            <Text style={styles.statNumber}>{stats.totalZones}</Text>
+            <Text style={styles.statLabel}>Zonas</Text>
+          </View>
+          <View style={styles.statCard}>
+            <Ionicons name="warning-outline" size={20} color="#F44336" />
+            <Text style={styles.statNumber}>{stats.highRiskZones}</Text>
+            <Text style={styles.statLabel}>Alto Riesgo</Text>
+          </View>
+          <View style={styles.statCard}>
+            <Ionicons name="time-outline" size={20} color="#4CAF50" />
+            <Text style={styles.statNumber}>
+              {lastUpdate ? lastUpdate.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : '--:--'}
+            </Text>
+            <Text style={styles.statLabel}>Última Act.</Text>
+          </View>
         </View>
 
-        <Text style={styles.messageText}>
-          {riskData?.mensaje || 'Analizando zona...'}
-        </Text>
-
-        {riskData && (
-          <View style={styles.statsContainer}>
-            <View style={styles.statItem}>
-              <Text style={styles.statLabel}>Probabilidad</Text>
-              <Text style={styles.statValue}>
-                {(riskData.probability * 100).toFixed(1)}%
-              </Text>
-            </View>
-            <View style={styles.statItem}>
-              <Text style={styles.statLabel}>Riesgo</Text>
-              <Text style={styles.statValue}>
-                {(riskData.riesgo * 100).toFixed(1)}%
-              </Text>
-            </View>
+        {location && (
+          <View style={styles.coordsContainer}>
+            <Text style={styles.coordsText}>
+              📍 {location.coords.latitude.toFixed(6)}, {location.coords.longitude.toFixed(6)}
+            </Text>
           </View>
         )}
 
-        <View style={styles.coordsContainer}>
-          <Text style={styles.coordsText}>
-            📍 {location.coords.latitude.toFixed(4)}, {location.coords.longitude.toFixed(4)}
-          </Text>
-          {lastUpdate && (
-            <Text style={styles.updateText}>
-              Actualizado: {lastUpdate.toLocaleTimeString('es-ES')}
-            </Text>
-          )}
-        </View>
-
-        <TouchableOpacity style={styles.refreshButton} onPress={refreshLocation}>
+        <TouchableOpacity style={styles.refreshButton} onPress={refreshAll}>
           <Ionicons name="refresh" size={20} color="#FFF" />
-          <Text style={styles.refreshButtonText}>Actualizar Ubicación</Text>
+          <Text style={styles.refreshButtonText}>Actualizar Todo</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -518,23 +712,17 @@ function AlertsScreen() {
 
   const getRiskIcon = (level) => {
     switch (level) {
-      case 'Alto':
-        return 'warning';
-      case 'Medio':
-        return 'alert-circle';
-      default:
-        return 'checkmark-circle';
+      case 'Alto': return 'warning';
+      case 'Medio': return 'alert-circle';
+      default: return 'checkmark-circle';
     }
   };
 
   const getRiskColor = (level) => {
     switch (level) {
-      case 'Alto':
-        return '#F44336';
-      case 'Medio':
-        return '#FF9800';
-      default:
-        return '#4CAF50';
+      case 'Alto': return '#F44336';
+      case 'Medio': return '#FF9800';
+      default: return '#4CAF50';
     }
   };
 
@@ -552,17 +740,13 @@ function AlertsScreen() {
         )}
       </View>
 
-      <ScrollView
-        style={styles.alertsList}
-        refreshing={refreshing}
-        onRefresh={loadAlerts}
-      >
+      <ScrollView style={styles.alertsList}>
         {alerts.length === 0 ? (
           <View style={styles.emptyContainer}>
             <Ionicons name="notifications-off-outline" size={60} color="#CCC" />
             <Text style={styles.emptyText}>No hay alertas registradas</Text>
             <Text style={styles.emptySubtext}>
-              Las alertas aparecerán aquí cuando se detecte tu ubicación
+              Las alertas aparecerán aquí cuando te acerques a zonas de riesgo
             </Text>
           </View>
         ) : (
@@ -594,9 +778,17 @@ function AlertsScreen() {
                 <View style={styles.alertDetailItem}>
                   <Ionicons name="speedometer-outline" size={16} color="#666" />
                   <Text style={styles.alertDetailText}>
-                    {(alert.probability * 100).toFixed(1)}%
+                    {(alert.probability * 100).toFixed(0)}%
                   </Text>
                 </View>
+                {alert.accident_count && (
+                  <View style={styles.alertDetailItem}>
+                    <Ionicons name="car-outline" size={16} color="#666" />
+                    <Text style={styles.alertDetailText}>
+                      {alert.accident_count} accidentes
+                    </Text>
+                  </View>
+                )}
               </View>
             </View>
           ))
@@ -613,8 +805,10 @@ function SettingsScreen() {
     interval: 5,
     notificationsEnabled: true,
     edad: 30,
+    alertDistance: 200,
   });
   const [modalVisible, setModalVisible] = useState(false);
+  const [distanceModalVisible, setDistanceModalVisible] = useState(false);
 
   useEffect(() => {
     loadSettings();
@@ -631,24 +825,23 @@ function SettingsScreen() {
     await StorageService.saveSettings(newSettings);
 
     if (key === 'interval') {
-      Alert.alert('Actualizado', 'El nuevo intervalo se aplicará en el próximo envío. Reinicia la app para aplicar cambios inmediatamente.');
+      Alert.alert('Actualizado', 'El nuevo intervalo se aplicará en el próximo ciclo.');
     }
   };
 
   const testNotification = async () => {
     await Notifications.scheduleNotificationAsync({
       content: {
-        title: '⚠️ Alerta de Riesgo Alto',
-        body: 'Esta es una notificación de prueba. Zona de alto riesgo detectada.',
+        title: '⚠️ Advertencia: Zona de Riesgo',
+        body: 'Esta es una notificación de prueba. Zona de alto riesgo detectada a 150m.',
         sound: true,
-        data: { test: true },
       },
       trigger: null,
     });
-    // Alert.alert('✅ Notificación enviada', 'Revisa la bandeja de notificaciones');
   };
 
   const intervals = [1, 3, 5, 10, 15];
+  const distances = [100, 150, 200, 300, 500];
 
   return (
     <SafeAreaView style={styles.container}>
@@ -679,7 +872,7 @@ function SettingsScreen() {
         </View>
 
         <View style={styles.settingsSection}>
-          <Text style={styles.sectionTitle}>⏱️ Frecuencia de Envío</Text>
+          <Text style={styles.sectionTitle}>⏱️ Frecuencia de Actualización</Text>
           
           <TouchableOpacity
             style={styles.settingItem}
@@ -688,7 +881,7 @@ function SettingsScreen() {
             <View>
               <Text style={styles.settingLabel}>Intervalo de actualización</Text>
               <Text style={styles.settingDescription}>
-                Cada cuánto se envían las coordenadas
+                Cada cuánto se actualiza tu ubicación
               </Text>
             </View>
             <View style={styles.settingValue}>
@@ -699,13 +892,33 @@ function SettingsScreen() {
         </View>
 
         <View style={styles.settingsSection}>
+          <Text style={styles.sectionTitle}>📍 Distancia de Alerta</Text>
+          
+          <TouchableOpacity
+            style={styles.settingItem}
+            onPress={() => setDistanceModalVisible(true)}
+          >
+            <View>
+              <Text style={styles.settingLabel}>Distancia de proximidad</Text>
+              <Text style={styles.settingDescription}>
+                A qué distancia alertar sobre zonas de riesgo
+              </Text>
+            </View>
+            <View style={styles.settingValue}>
+              <Text style={styles.settingValueText}>{settings.alertDistance}m</Text>
+              <Ionicons name="chevron-forward" size={20} color="#999" />
+            </View>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.settingsSection}>
           <Text style={styles.sectionTitle}>🔔 Notificaciones</Text>
           
           <View style={styles.settingItem}>
             <View>
-              <Text style={styles.settingLabel}>Alertas de riesgo</Text>
+              <Text style={styles.settingLabel}>Alertas de proximidad</Text>
               <Text style={styles.settingDescription}>
-                Recibir notificaciones en zonas de alto riesgo
+                Recibir notificaciones al acercarte a zonas de riesgo
               </Text>
             </View>
             <Switch
@@ -725,46 +938,47 @@ function SettingsScreen() {
           </TouchableOpacity>
         </View>
 
-        <View style={styles.settingsSection}>
-          <Text style={styles.sectionTitle}>🧪 Modo de Prueba</Text>
-          
-          <View style={styles.demInfoCard}>
-            <View style={styles.demInfoHeader}>
-              <Ionicons name="flask" size={24} color="#FF6B6B" />
-              <Text style={styles.demInfoTitle}>MODO DEMO ACTIVADO</Text>
-            </View>
-            <Text style={styles.demInfoText}>
-              La app está usando coordenadas de demostración para simular una zona de riesgo.
-            </Text>
-            <View style={styles.demoCoordsBox}>
-              <Text style={styles.demoCoordsLabel}>Coordenadas de prueba:</Text>
-              <Text style={styles.demoCoordsValue}>
-                📍 {DEMO_COORDINATES.latitude}, {DEMO_COORDINATES.longitude}
+        {DEMO_MODE && (
+          <View style={styles.settingsSection}>
+            <Text style={styles.sectionTitle}>🧪 Modo de Prueba</Text>
+            
+            <View style={styles.demoInfoCard}>
+              <View style={styles.demoInfoHeader}>
+                <Ionicons name="flask" size={24} color="#FF6B6B" />
+                <Text style={styles.demoInfoTitle}>MODO DEMO ACTIVADO</Text>
+              </View>
+              <Text style={styles.demoInfoText}>
+                La app está usando coordenadas de demostración con zonas de riesgo simuladas basadas en datos históricos.
+              </Text>
+              <View style={styles.demoCoordsBox}>
+                <Text style={styles.demoCoordsLabel}>Coordenadas de prueba:</Text>
+                <Text style={styles.demoCoordsValue}>
+                  📍 {DEMO_COORDINATES.latitude}, {DEMO_COORDINATES.longitude}
+                </Text>
+              </View>
+              <Text style={styles.demoInfoNote}>
+                💡 Para usar tu ubicación real, cambia DEMO_MODE = false en el código
               </Text>
             </View>
-            <Text style={styles.demInfoNote}>
-              💡 Para usar tu ubicación real, cambia DEMO_MODE = false en el código
-            </Text>
           </View>
-        </View>
+        )}
 
         <View style={styles.infoSection}>
           <Ionicons name="information-circle-outline" size={24} color="#666" />
           <Text style={styles.infoText}>
-            La aplicación enviará tu ubicación al servidor cada {settings.interval} minutos
-            para analizar el riesgo de accidentes en tiempo real. Sin mapas de Google, sin costos adicionales.
+            La aplicación usa zonas de riesgo basadas en accidentes históricos. Te alertará cuando te acerques a {settings.alertDistance}m de una zona peligrosa.
           </Text>
         </View>
 
         <View style={styles.versionSection}>
-          <Text style={styles.versionText}>Versión 1.0.0</Text>
+          <Text style={styles.versionText}>Versión 2.0.0</Text>
           <Text style={styles.versionSubtext}>
-            Predicción de riesgos con IA
+            Mapa de calor con zonas de riesgo histórico
           </Text>
         </View>
       </ScrollView>
 
-      {/* Modal de selección de intervalo */}
+      {/* Modal de intervalo */}
       <Modal
         animationType="slide"
         transparent={true}
@@ -810,6 +1024,53 @@ function SettingsScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Modal de distancia */}
+      <Modal
+        animationType="slide"
+        transparent={true}
+        visible={distanceModalVisible}
+        onRequestClose={() => setDistanceModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Distancia de Alerta</Text>
+            
+            {distances.map((distance) => (
+              <TouchableOpacity
+                key={distance}
+                style={[
+                  styles.intervalOption,
+                  settings.alertDistance === distance && styles.intervalOptionSelected,
+                ]}
+                onPress={() => {
+                  updateSetting('alertDistance', distance);
+                  setDistanceModalVisible(false);
+                }}
+              >
+                <Text
+                  style={[
+                    styles.intervalText,
+                    settings.alertDistance === distance && styles.intervalTextSelected,
+                  ]}
+                >
+                  {distance} metros
+                </Text>
+                {settings.alertDistance === distance && (
+                  <Ionicons name="checkmark-circle" size={24} color="#FF6B6B" />
+                )}
+              </TouchableOpacity>
+            ))}
+
+            <TouchableOpacity
+              style={styles.modalCloseButton}
+              onPress={() => setDistanceModalVisible(false)}
+            >
+              <Text style={styles.modalCloseText}>Cerrar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -826,7 +1087,7 @@ export default function App() {
     if (status !== 'granted') {
       Alert.alert(
         'Permisos de notificación',
-        'Se recomienda activar las notificaciones para recibir alertas de riesgo'
+        'Se recomienda activar las notificaciones para recibir alertas de zonas de riesgo'
       );
     }
   };
@@ -840,7 +1101,7 @@ export default function App() {
             let iconName;
 
             if (route.name === 'Mapa') {
-              iconName = focused ? 'location' : 'location-outline';
+              iconName = focused ? 'map' : 'map-outline';
             } else if (route.name === 'Alertas') {
               iconName = focused ? 'notifications' : 'notifications-outline';
             } else if (route.name === 'Configuración') {
@@ -878,7 +1139,7 @@ export default function App() {
         <Tab.Screen 
           name="Mapa" 
           component={MapScreen}
-          options={{ headerTitle: '🗺️ Zona de Riesgo' }}
+          options={{ headerTitle: '🗺️ Mapa de Riesgo' }}
         />
         <Tab.Screen 
           name="Alertas" 
@@ -912,93 +1173,62 @@ const styles = StyleSheet.create({
     marginTop: 20,
     fontSize: 16,
     color: '#666',
+    fontWeight: '600',
   },
-  // Mapa personalizado
-  customMapContainer: {
+  loadingSubtext: {
+    marginTop: 8,
+    fontSize: 13,
+    color: '#999',
+  },
+  mapContainer: {
     flex: 1,
-    backgroundColor: '#E8F5E9',
+  },
+  map: {
+    flex: 1,
+  },
+  customMarker: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
     justifyContent: 'center',
     alignItems: 'center',
-    position: 'relative',
-    overflow: 'hidden',
-  },
-  gridOverlay: {
-    position: 'absolute',
-    width: '100%',
-    height: '100%',
-    opacity: 0.1,
-  },
-  gridLineHorizontal: {
-    position: 'absolute',
-    width: '100%',
-    height: 1,
-    backgroundColor: '#666',
-  },
-  gridLineVertical: {
-    position: 'absolute',
-    width: 1,
-    height: '100%',
-    backgroundColor: '#666',
-  },
-  riskCircle: {
-    position: 'absolute',
-    width: 300,
-    height: 300,
-    borderRadius: 150,
-    borderWidth: 2,
-  },
-  riskCircleInner: {
-    position: 'absolute',
-    width: 150,
-    height: 150,
-    borderRadius: 75,
-    borderWidth: 2,
-  },
-  locationMarker: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 4,
+    borderWidth: 3,
     borderColor: '#FFF',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 10,
-    zIndex: 100,
-  },
-  compassContainer: {
-    position: 'absolute',
-    top: 20,
-    right: 20,
-    backgroundColor: '#FFF',
-    borderRadius: 30,
-    width: 60,
-    height: 60,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
+    shadowOpacity: 0.3,
     shadowRadius: 4,
     elevation: 5,
   },
-  compassText: {
-    fontSize: 10,
-    fontWeight: 'bold',
-    color: '#666',
-    marginTop: 2,
+  riskMarker: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 15,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#FFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+    elevation: 4,
   },
-  openMapButton: {
+  riskMarkerText: {
+    color: '#FFF',
+    fontWeight: 'bold',
+    fontSize: 11,
+    marginLeft: 4,
+  },
+  demoBanner: {
     position: 'absolute',
-    top: 20,
-    left: 20,
+    top: 10,
+    left: '50%',
+    transform: [{ translateX: -75 }],
     backgroundColor: '#FF6B6B',
-    borderRadius: 25,
-    paddingHorizontal: 20,
-    paddingVertical: 12,
+    paddingHorizontal: 15,
+    paddingVertical: 8,
+    borderRadius: 20,
     flexDirection: 'row',
     alignItems: 'center',
     shadowColor: '#000',
@@ -1006,48 +1236,84 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 4,
     elevation: 5,
+    zIndex: 1000,
   },
-  openMapText: {
+  demoText: {
     color: '#FFF',
     fontWeight: 'bold',
-    marginLeft: 8,
+    fontSize: 12,
+    marginLeft: 5,
+  },
+  proximityBanner: {
+    position: 'absolute',
+    top: 60,
+    left: 15,
+    right: 15,
+    backgroundColor: '#F44336',
+    paddingHorizontal: 15,
+    paddingVertical: 12,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+    zIndex: 999,
+  },
+  proximityInfo: {
+    flex: 1,
+    marginLeft: 10,
+  },
+  proximityTitle: {
+    color: '#FFF',
+    fontWeight: 'bold',
     fontSize: 14,
   },
-  directionsContainer: {
-    position: 'absolute',
-    width: '100%',
-    height: '100%',
-  },
-  directionLabel: {
-    position: 'absolute',
-    top: 100,
-    left: '50%',
-    transform: [{ translateX: -20 }],
+  proximityText: {
+    color: '#FFF',
     fontSize: 12,
-    fontWeight: 'bold',
-    color: '#666',
+    marginTop: 2,
+  },
+  proximitySubtext: {
+    color: '#FFE0E0',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  mapLegend: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
     backgroundColor: '#FFF',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
+    borderRadius: 10,
+    padding: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 5,
   },
-  directionRight: {
-    top: '50%',
-    left: 'auto',
-    right: 20,
-    transform: [{ translateY: -10 }],
+  legendTitle: {
+    fontSize: 11,
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: 8,
   },
-  directionBottom: {
-    top: 'auto',
-    bottom: 100,
-    left: '50%',
-    transform: [{ translateX: -20 }],
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
   },
-  directionLeft: {
-    top: '50%',
-    left: 20,
-    right: 'auto',
-    transform: [{ translateY: -10 }],
+  legendDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: 6,
+  },
+  legendText: {
+    fontSize: 10,
+    color: '#666',
   },
   infoPanel: {
     position: 'absolute',
@@ -1064,56 +1330,37 @@ const styles = StyleSheet.create({
     shadowRadius: 10,
     elevation: 10,
   },
-  riskBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 10,
-  },
-  riskText: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    marginLeft: 10,
-  },
-  messageText: {
-    fontSize: 16,
-    textAlign: 'center',
-    color: '#666',
-    marginBottom: 15,
-  },
-  statsContainer: {
+  statsRow: {
     flexDirection: 'row',
     justifyContent: 'space-around',
     marginBottom: 15,
-    paddingVertical: 10,
-    backgroundColor: '#F9F9F9',
-    borderRadius: 10,
   },
-  statItem: {
+  statCard: {
     alignItems: 'center',
+    flex: 1,
   },
-  statLabel: {
-    fontSize: 12,
-    color: '#999',
-    marginBottom: 5,
-  },
-  statValue: {
-    fontSize: 18,
+  statNumber: {
+    fontSize: 20,
     fontWeight: 'bold',
     color: '#333',
+    marginTop: 5,
+  },
+  statLabel: {
+    fontSize: 11,
+    color: '#999',
+    marginTop: 2,
   },
   coordsContainer: {
     alignItems: 'center',
     marginBottom: 15,
+    paddingVertical: 10,
+    backgroundColor: '#F9F9F9',
+    borderRadius: 8,
   },
   coordsText: {
     fontSize: 12,
-    color: '#999',
-  },
-  updateText: {
-    fontSize: 10,
-    color: '#CCC',
-    marginTop: 4,
+    color: '#666',
+    fontWeight: '600',
   },
   refreshButton: {
     backgroundColor: '#FF6B6B',
@@ -1220,10 +1467,13 @@ const styles = StyleSheet.create({
     paddingTop: 10,
     borderTopWidth: 1,
     borderTopColor: '#EEE',
+    flexWrap: 'wrap',
   },
   alertDetailItem: {
     flexDirection: 'row',
     alignItems: 'center',
+    marginRight: 15,
+    marginTop: 5,
   },
   alertDetailText: {
     fontSize: 12,
@@ -1266,6 +1516,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#999',
     marginTop: 2,
+    maxWidth: '80%',
   },
   settingValue: {
     flexDirection: 'row',
@@ -1288,6 +1539,67 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#E0E0E0',
     fontWeight: '600',
+  },
+  testButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFE8E8',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 10,
+    marginTop: 10,
+  },
+  testButtonText: {
+    color: '#FF6B6B',
+    fontWeight: 'bold',
+    fontSize: 14,
+    marginLeft: 8,
+  },
+  demoInfoCard: {
+    backgroundColor: '#FFF9E6',
+    borderRadius: 10,
+    padding: 15,
+    borderWidth: 2,
+    borderColor: '#FFD700',
+  },
+  demoInfoHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  demoInfoTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#FF6B6B',
+    marginLeft: 10,
+  },
+  demoInfoText: {
+    fontSize: 13,
+    color: '#666',
+    lineHeight: 20,
+    marginBottom: 10,
+  },
+  demoCoordsBox: {
+    backgroundColor: '#FFF',
+    padding: 10,
+    borderRadius: 8,
+    marginBottom: 10,
+  },
+  demoCoordsLabel: {
+    fontSize: 11,
+    color: '#999',
+    marginBottom: 4,
+  },
+  demoCoordsValue: {
+    fontSize: 13,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  demoInfoNote: {
+    fontSize: 11,
+    color: '#999',
+    fontStyle: 'italic',
   },
   infoSection: {
     flexDirection: 'row',
@@ -1370,90 +1682,5 @@ const styles = StyleSheet.create({
     color: '#FFF',
     fontSize: 16,
     fontWeight: 'bold',
-  },
-  demoBanner: {
-    position: 'absolute',
-    top: 10,
-    left: '50%',
-    transform: [{ translateX: -75 }],
-    backgroundColor: '#FF6B6B',
-    paddingHorizontal: 15,
-    paddingVertical: 8,
-    borderRadius: 20,
-    flexDirection: 'row',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 5,
-    zIndex: 1000,
-  },
-  demoText: {
-    color: '#FFF',
-    fontWeight: 'bold',
-    fontSize: 12,
-    marginLeft: 5,
-  },
-  testButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#FFE8E8',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 10,
-    marginTop: 10,
-  },
-  testButtonText: {
-    color: '#FF6B6B',
-    fontWeight: 'bold',
-    fontSize: 14,
-    marginLeft: 8,
-  },
-  demInfoCard: {
-    backgroundColor: '#FFF9E6',
-    borderRadius: 10,
-    padding: 15,
-    borderWidth: 2,
-    borderColor: '#FFD700',
-  },
-  demInfoHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  demInfoTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#FF6B6B',
-    marginLeft: 10,
-  },
-  demInfoText: {
-    fontSize: 13,
-    color: '#666',
-    lineHeight: 20,
-    marginBottom: 10,
-  },
-  demoCoordsBox: {
-    backgroundColor: '#FFF',
-    padding: 10,
-    borderRadius: 8,
-    marginBottom: 10,
-  },
-  demoCoordsLabel: {
-    fontSize: 11,
-    color: '#999',
-    marginBottom: 4,
-  },
-  demoCoordsValue: {
-    fontSize: 13,
-    fontWeight: 'bold',
-    color: '#333',
-  },
-  demInfoNote: {
-    fontSize: 11,
-    color: '#999',
-    fontStyle: 'italic',
   },
 });
