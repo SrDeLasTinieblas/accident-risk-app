@@ -25,7 +25,7 @@ import MapView, { Marker, Circle } from 'react-native-maps';
 const Tab = createBottomTabNavigator();
 
 // 🧪 MODO DE PRUEBA
-const DEMO_MODE = false;
+const DEMO_MODE = true;
 const DEMO_COORDINATES = {
   latitude: -16.3974773,
   longitude: -71.501184,
