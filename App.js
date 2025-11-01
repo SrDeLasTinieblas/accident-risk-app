@@ -25,10 +25,10 @@ import MapView, { Marker, Circle } from 'react-native-maps';
 const Tab = createBottomTabNavigator();
 
 // 🧪 MODO DE PRUEBA
-const DEMO_MODE = true;
+const DEMO_MODE = false;
 const DEMO_COORDINATES = {
-  latitude: -16.3974773,
-  longitude: -71.501184,
+  latitude: -16.4306534,
+  longitude: -71.5581388,
 };
 
 // 🔴 URL de tu API
@@ -453,7 +453,7 @@ function CustomMapView({ location, riskZones, onInsideZone }) {
         ))}
 
         {/* Tu ubicación - Camión/Carro */}
-        {/* <Marker
+        <Marker
           coordinate={{ latitude, longitude }}
           title="Tu ubicación"
           description={insideZone ? `⚠️ Zona ${insideZone.risk_level}` : '✅ Zona segura'}
@@ -467,16 +467,16 @@ function CustomMapView({ location, riskZones, onInsideZone }) {
               color={insideZone ? '#F44336' : '#4CAF50'} 
             />
           </View>
-        </Marker> */}
+        </Marker>
 
         {/* Círculo alrededor tuyo */}
-        {/* <Circle
+        <Circle
           center={{ latitude, longitude }}
           radius={30}
           fillColor={insideZone ? "rgba(244, 67, 54, 0.3)" : "rgba(76, 175, 80, 0.3)"}
           strokeColor={insideZone ? "#F44336" : "#4CAF50"}
           strokeWidth={2}
-        /> */}
+        />
       </MapView>
 
       {/* 🚨 BANNER COMPLETO CUANDO ESTÁS DENTRO */}
@@ -637,7 +637,23 @@ function MapScreen() {
       accident_count: zone.accident_count
     };
 
+    // 🚀 Registrar alerta en Google Sheets
+    try {
+      const SHEETS_URL = "https://script.google.com/macros/s/AKfycbzzIyr0xEd51TFpWEXECmqYxUNLRYIgzmIbkDwr_ncsBoezc9qrRMLgZJxmxjUKjudW/exec"; // tu URL del paso 2
+      await fetch(SHEETS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(alert),
+      });
+    } catch (err) {
+      console.error("Error enviando a Sheets:", err);
+    }
+
     await StorageService.saveAlert(alert);
+
+
+
+
   };
 
   const refreshZones = async () => {
