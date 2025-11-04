@@ -31,8 +31,85 @@ const DEMO_COORDINATES = {
   longitude: -71.5581388,
 };
 
-// 🔴 URL de tu API
+// 🔴 URLs
 const API_BASE_URL = 'https://accident-risk-model.onrender.com';
+const ERROR_LOG_SHEET_URL = "https://script.google.com/macros/s/AKfycbz9q85J_3WXuUM7QflHtCe7NJcxZQ1R-4JSXuvX9wvM30JzFQebZCMMmpuCStJ0WGDZXg/exec";
+
+// ==================== SISTEMA DE LOG DE ERRORES ====================
+
+const ErrorLogger = {
+  /**
+   * Envía un error al Google Sheet centralizado
+   */
+  async logError({
+    module = "Desconocido",
+    errorType = "Desconocido",
+    message = "",
+    stacktrace = "",
+    endpoint = "",
+    user = "",
+    latitude = null,
+    longitude = null,
+    additionalData = {}
+  } = {}) {
+    try {
+      const system = "App de Accidentes de carreteras Arequipa";
+      const version = "1.0.0";
+
+      const body = {
+        system,
+        module,
+        errorType,
+        message,
+        stacktrace,
+        user,
+        version,
+        endpoint,
+        latitude: latitude || "",
+        longitude: longitude || "",
+        platform: Platform.OS,
+        ...additionalData
+      };
+
+      console.log("📤 Enviando error a Google Sheets:", body);
+
+      const response = await fetch(ERROR_LOG_SHEET_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (response.ok) {
+        console.log("✅ Error enviado al Google Sheet");
+      } else {
+        console.error("⚠️ Respuesta no OK del Sheet:", response.status);
+      }
+    } catch (err) {
+      console.error("❌ No se pudo enviar el error al Sheet:", err);
+    }
+  },
+
+  /**
+   * Wrapper para funciones async que captura errores automáticamente
+   */
+  async wrapAsync(fn, context = {}) {
+    try {
+      return await fn();
+    } catch (error) {
+      await this.logError({
+        module: context.module || "Unknown Module",
+        errorType: context.errorType || "Runtime Error",
+        message: error.message || "Unknown error",
+        stacktrace: error.stack || "",
+        endpoint: context.endpoint || "",
+        latitude: context.latitude,
+        longitude: context.longitude,
+        additionalData: context.additionalData || {}
+      });
+      throw error; // Re-lanzar para que el código original maneje el error
+    }
+  }
+};
 
 // Configuración de notificaciones
 Notifications.setNotificationHandler({
@@ -49,73 +126,112 @@ const LocationService = {
   locationSubscription: null,
   demoInterval: null,
   
-  // 🎯 SEGUIMIENTO GPS EN TIEMPO REAL
-  async startRealTimeTracking(onUpdate) {
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permiso denegado', 'Se necesita acceso a la ubicación');
-      return;
-    }
+  async startRealTimeTracking(onUpdate, onError) {
+    return await ErrorLogger.wrapAsync(async () => {
+      try {
+        const enabled = await Location.hasServicesEnabledAsync();
+        if (!enabled) {
+          onError('Por favor activa el GPS en la configuración de tu dispositivo');
+          return false;
+        }
 
-    // Obtener ubicación inicial
-    const location = await Location.getCurrentPositionAsync({
-      accuracy: Location.Accuracy.High,
-    });
-    onUpdate(location);
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        
+        if (status !== 'granted') {
+          onError('Se necesita acceso a la ubicación para funcionar');
+          await ErrorLogger.logError({
+            module: "LocationService.startRealTimeTracking",
+            errorType: "Permission Error",
+            message: "Permisos de ubicación denegados",
+          });
+          return false;
+        }
 
-    // Suscribirse a actualizaciones continuas
-    this.locationSubscription = await Location.watchPositionAsync(
-      {
-        accuracy: Location.Accuracy.Balanced,  // Balanced para mejor rendimiento
-        timeInterval: 3000,        // Cada 3 segundos (menos lag)
-        distanceInterval: 15,      // O cada 15 metros
-      },
-      (newLocation) => {
-        onUpdate(newLocation);
+        try {
+          const location = await Promise.race([
+            Location.getCurrentPositionAsync({
+              accuracy: Location.Accuracy.High,
+            }),
+            new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('Timeout GPS')), 10000)
+            )
+          ]);
+          
+          onUpdate(location);
+        } catch (err) {
+          console.log('Error obteniendo ubicación inicial, usando baja precisión:', err);
+          
+          await ErrorLogger.logError({
+            module: "LocationService.startRealTimeTracking",
+            errorType: "GPS Timeout",
+            message: "Timeout obteniendo ubicación de alta precisión",
+            stacktrace: err.stack,
+          });
+
+          try {
+            const location = await Location.getCurrentPositionAsync({
+              accuracy: Location.Accuracy.Low,
+            });
+            onUpdate(location);
+          } catch (fallbackErr) {
+            await ErrorLogger.logError({
+              module: "LocationService.startRealTimeTracking",
+              errorType: "GPS Error",
+              message: "No se pudo obtener ubicación ni con baja precisión",
+              stacktrace: fallbackErr.stack,
+            });
+            onError('No se pudo obtener la ubicación. Intenta en un lugar abierto.');
+            return false;
+          }
+        }
+
+        this.locationSubscription = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.Balanced,
+            timeInterval: 3000,
+            distanceInterval: 15,
+          },
+          (newLocation) => {
+            try {
+              onUpdate(newLocation);
+            } catch (err) {
+              console.error('Error procesando ubicación:', err);
+              ErrorLogger.logError({
+                module: "LocationService.watchPositionAsync",
+                errorType: "Location Update Error",
+                message: err.message,
+                stacktrace: err.stack,
+                latitude: newLocation?.coords?.latitude,
+                longitude: newLocation?.coords?.longitude,
+              });
+            }
+          }
+        );
+
+        return true;
+      } catch (error) {
+        console.error('Error en startRealTimeTracking:', error);
+        await ErrorLogger.logError({
+          module: "LocationService.startRealTimeTracking",
+          errorType: "GPS Initialization Error",
+          message: error.message,
+          stacktrace: error.stack,
+        });
+        onError('Error al iniciar GPS: ' + error.message);
+        return false;
       }
-    );
+    }, {
+      module: "LocationService.startRealTimeTracking",
+      errorType: "Wrapper Error"
+    });
   },
 
-  // 🧪 MODO DEMO - Movimiento simulado fluido
   startDemoTracking(onUpdate) {
-    let currentLat = DEMO_COORDINATES.latitude;
-    let currentLon = DEMO_COORDINATES.longitude;
-    let angle = Math.random() * Math.PI * 2;
-    const speed = 0.00004; // Velocidad más visible
-
-    // Ubicación inicial
-    onUpdate({
-      coords: {
-        latitude: currentLat,
-        longitude: currentLon,
-        altitude: 0,
-        accuracy: 10,
-        heading: angle * (180 / Math.PI),
-        speed: 3,
-      },
-      timestamp: Date.now(),
-    });
-
-    // Actualizar cada 3 segundos (mejor rendimiento)
-    this.demoInterval = setInterval(() => {
-      // Cambiar dirección ocasionalmente
-      if (Math.random() < 0.15) {
-        angle += (Math.random() - 0.5) * 0.8;
-      }
-
-      // Actualizar posición
-      currentLat += Math.cos(angle) * speed;
-      currentLon += Math.sin(angle) * speed;
-
-      // Mantener en área cercana
-      const distFromCenter = Math.sqrt(
-        Math.pow(currentLat - DEMO_COORDINATES.latitude, 2) +
-        Math.pow(currentLon - DEMO_COORDINATES.longitude, 2)
-      );
-
-      if (distFromCenter > 0.008) {
-        angle += Math.PI;
-      }
+    try {
+      let currentLat = DEMO_COORDINATES.latitude;
+      let currentLon = DEMO_COORDINATES.longitude;
+      let angle = Math.random() * Math.PI * 2;
+      const speed = 0.00004;
 
       onUpdate({
         coords: {
@@ -128,26 +244,84 @@ const LocationService = {
         },
         timestamp: Date.now(),
       });
-    }, 3000); // 3 segundos para evitar lag
+
+      this.demoInterval = setInterval(() => {
+        try {
+          if (Math.random() < 0.15) {
+            angle += (Math.random() - 0.5) * 0.8;
+          }
+
+          currentLat += Math.cos(angle) * speed;
+          currentLon += Math.sin(angle) * speed;
+
+          const distFromCenter = Math.sqrt(
+            Math.pow(currentLat - DEMO_COORDINATES.latitude, 2) +
+            Math.pow(currentLon - DEMO_COORDINATES.longitude, 2)
+          );
+
+          if (distFromCenter > 0.008) {
+            angle += Math.PI;
+          }
+
+          onUpdate({
+            coords: {
+              latitude: currentLat,
+              longitude: currentLon,
+              altitude: 0,
+              accuracy: 10,
+              heading: angle * (180 / Math.PI),
+              speed: 3,
+            },
+            timestamp: Date.now(),
+          });
+        } catch (error) {
+          ErrorLogger.logError({
+            module: "LocationService.demoInterval",
+            errorType: "Demo Tracking Error",
+            message: error.message,
+            stacktrace: error.stack,
+          });
+        }
+      }, 3000);
+
+      return true;
+    } catch (error) {
+      ErrorLogger.logError({
+        module: "LocationService.startDemoTracking",
+        errorType: "Demo Initialization Error",
+        message: error.message,
+        stacktrace: error.stack,
+      });
+      return false;
+    }
   },
 
   stopTracking() {
-    if (this.locationSubscription) {
-      if (typeof this.locationSubscription.remove === 'function') {
-        this.locationSubscription.remove();
+    try {
+      if (this.locationSubscription) {
+        if (typeof this.locationSubscription.remove === 'function') {
+          this.locationSubscription.remove();
+        }
+        this.locationSubscription = null;
       }
-      this.locationSubscription = null;
-    }
-    
-    if (this.demoInterval) {
-      clearInterval(this.demoInterval);
-      this.demoInterval = null;
+      
+      if (this.demoInterval) {
+        clearInterval(this.demoInterval);
+        this.demoInterval = null;
+      }
+    } catch (error) {
+      console.error('Error deteniendo tracking:', error);
+      ErrorLogger.logError({
+        module: "LocationService.stopTracking",
+        errorType: "Stop Tracking Error",
+        message: error.message,
+        stacktrace: error.stack,
+      });
     }
   },
 };
 
 const APIService = {
-  // Obtener zonas de riesgo desde API
   async getRiskZones(minRiskLevel = 1, minAccidents = 1, limit = 100, sortBy = 'risk') {
     try {
       let url = `${API_BASE_URL}/risk-zones?min_risk=${minRiskLevel}&min_accidents=${minAccidents}`;
@@ -158,21 +332,39 @@ const APIService = {
       
       url += `&sort_by=${sortBy}`;
       
-      const response = await fetch(url);
+      const response = await Promise.race([
+        fetch(url),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Timeout API')), 10000)
+        )
+      ]);
       
       if (!response.ok) {
+        console.log('API no disponible, usando datos demo');
+        await ErrorLogger.logError({
+          module: "APIService.getRiskZones",
+          errorType: "API Response Error",
+          message: `API respondió con status ${response.status}`,
+          endpoint: url,
+        });
         return this.getDemoRiskZones();
       }
 
       const data = await response.json();
       return data.zones || [];
     } catch (error) {
-      console.error('❌ Error al obtener zonas:', error);
+      console.log('Error conectando a API, usando datos demo:', error.message);
+      await ErrorLogger.logError({
+        module: "APIService.getRiskZones",
+        errorType: "API Connection Error",
+        message: error.message,
+        stacktrace: error.stack,
+        endpoint: `${API_BASE_URL}/risk-zones`,
+      });
       return this.getDemoRiskZones();
     }
   },
 
-  // Zonas demo para pruebas
   getDemoRiskZones() {
     return [
       {
@@ -218,47 +410,67 @@ const APIService = {
     ];
   },
 
-  // Calcular distancia entre dos puntos
   calculateDistance(lat1, lon1, lat2, lon2) {
-    const R = 6371e3;
-    const φ1 = lat1 * Math.PI / 180;
-    const φ2 = lat2 * Math.PI / 180;
-    const Δφ = (lat2 - lat1) * Math.PI / 180;
-    const Δλ = (lon2 - lon1) * Math.PI / 180;
+    try {
+      const R = 6371e3;
+      const φ1 = lat1 * Math.PI / 180;
+      const φ2 = lat2 * Math.PI / 180;
+      const Δφ = (lat2 - lat1) * Math.PI / 180;
+      const Δλ = (lon2 - lon1) * Math.PI / 180;
 
-    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-              Math.cos(φ1) * Math.cos(φ2) *
-              Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+                Math.cos(φ1) * Math.cos(φ2) *
+                Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 
-    return R * c;
+      return R * c;
+    } catch (error) {
+      ErrorLogger.logError({
+        module: "APIService.calculateDistance",
+        errorType: "Calculation Error",
+        message: error.message,
+        stacktrace: error.stack,
+        additionalData: { lat1, lon1, lat2, lon2 }
+      });
+      return Infinity;
+    }
   },
 
-  // 🎯 VERIFICAR SI ESTÁS DENTRO DE ALGUNA ZONA
   checkInsideRiskZones(latitude, longitude, riskZones) {
-    const insideZones = [];
-    
-    for (const zone of riskZones) {
-      const distance = this.calculateDistance(
+    try {
+      const insideZones = [];
+      
+      for (const zone of riskZones) {
+        const distance = this.calculateDistance(
+          latitude,
+          longitude,
+          zone.latitude,
+          zone.longitude
+        );
+        
+        const zoneRadius = zone.radius || 100;
+        
+        if (distance <= zoneRadius) {
+          insideZones.push({
+            ...zone,
+            distance: Math.round(distance),
+            isInside: true
+          });
+        }
+      }
+      
+      return insideZones.sort((a, b) => b.risk_score - a.risk_score);
+    } catch (error) {
+      ErrorLogger.logError({
+        module: "APIService.checkInsideRiskZones",
+        errorType: "Zone Check Error",
+        message: error.message,
+        stacktrace: error.stack,
         latitude,
         longitude,
-        zone.latitude,
-        zone.longitude
-      );
-      
-      const zoneRadius = zone.radius || 100;
-      
-      if (distance <= zoneRadius) {
-        insideZones.push({
-          ...zone,
-          distance: Math.round(distance),
-          isInside: true
-        });
-      }
+      });
+      return [];
     }
-    
-    // Retornar ordenado por riesgo (más peligroso primero)
-    return insideZones.sort((a, b) => b.risk_score - a.risk_score);
   }
 };
 
@@ -268,6 +480,12 @@ const StorageService = {
       await AsyncStorage.setItem('settings', JSON.stringify(settings));
     } catch (error) {
       console.error('Error al guardar:', error);
+      await ErrorLogger.logError({
+        module: "StorageService.saveSettings",
+        errorType: "Storage Error",
+        message: error.message,
+        stacktrace: error.stack,
+      });
     }
   },
 
@@ -283,6 +501,12 @@ const StorageService = {
         sortBy: 'risk',
       };
     } catch (error) {
+      await ErrorLogger.logError({
+        module: "StorageService.getSettings",
+        errorType: "Storage Read Error",
+        message: error.message,
+        stacktrace: error.stack,
+      });
       return {
         notificationsEnabled: true,
         edad: 30,
@@ -301,6 +525,12 @@ const StorageService = {
       await AsyncStorage.setItem('alerts', JSON.stringify(alerts.slice(0, 50)));
     } catch (error) {
       console.error('Error:', error);
+      await ErrorLogger.logError({
+        module: "StorageService.saveAlert",
+        errorType: "Storage Error",
+        message: error.message,
+        stacktrace: error.stack,
+      });
     }
   },
 
@@ -309,6 +539,12 @@ const StorageService = {
       const alerts = await AsyncStorage.getItem('alerts');
       return alerts ? JSON.parse(alerts) : [];
     } catch (error) {
+      await ErrorLogger.logError({
+        module: "StorageService.getAlerts",
+        errorType: "Storage Read Error",
+        message: error.message,
+        stacktrace: error.stack,
+      });
       return [];
     }
   },
@@ -318,6 +554,12 @@ const StorageService = {
       await AsyncStorage.setItem('alerts', JSON.stringify([]));
     } catch (error) {
       console.error('Error:', error);
+      await ErrorLogger.logError({
+        module: "StorageService.clearAlerts",
+        errorType: "Storage Error",
+        message: error.message,
+        stacktrace: error.stack,
+      });
     }
   },
 
@@ -326,6 +568,12 @@ const StorageService = {
       await AsyncStorage.setItem('riskZones', JSON.stringify(zones));
     } catch (error) {
       console.error('Error:', error);
+      await ErrorLogger.logError({
+        module: "StorageService.saveRiskZones",
+        errorType: "Storage Error",
+        message: error.message,
+        stacktrace: error.stack,
+      });
     }
   },
 
@@ -334,6 +582,12 @@ const StorageService = {
       const zones = await AsyncStorage.getItem('riskZones');
       return zones ? JSON.parse(zones) : null;
     } catch (error) {
+      await ErrorLogger.logError({
+        module: "StorageService.getRiskZones",
+        errorType: "Storage Read Error",
+        message: error.message,
+        stacktrace: error.stack,
+      });
       return null;
     }
   }
@@ -352,46 +606,67 @@ function CustomMapView({ location, riskZones, onInsideZone }) {
   const longitude = location?.coords?.longitude;
 
   useEffect(() => {
-    if (latitude && longitude) {
-      const newRegion = {
-        latitude,
-        longitude,
-        latitudeDelta: 0.01,
-        longitudeDelta: 0.01,
-      };
-      setRegion(newRegion);
-      
-      // Solo mover mapa cada 2 actualizaciones (reduce lag)
-      updateCountRef.current += 1;
-      if (updateCountRef.current % 2 === 0 && mapRef.current) {
-        mapRef.current.animateToRegion(newRegion, 500);
-      }
-
-      // 🎯 DETECTAR SI ENTRASTE A UNA ZONA
-      if (riskZones && riskZones.length > 0) {
-        const insideZones = APIService.checkInsideRiskZones(latitude, longitude, riskZones);
+    try {
+      if (latitude && longitude) {
+        const newRegion = {
+          latitude,
+          longitude,
+          latitudeDelta: 0.01,
+          longitudeDelta: 0.01,
+        };
+        setRegion(newRegion);
         
-        if (insideZones.length > 0) {
-          const currentZone = insideZones[0];
-          setInsideZone(currentZone);
-          
-          // Notificar solo si es zona nueva
-          const zoneId = `${currentZone.latitude}-${currentZone.longitude}`;
-          const prevZoneId = previousZoneRef.current ? 
-            `${previousZoneRef.current.latitude}-${previousZoneRef.current.longitude}` : null;
-          
-          if (zoneId !== prevZoneId && onInsideZone) {
-            onInsideZone(currentZone);
+        updateCountRef.current += 1;
+        if (updateCountRef.current % 2 === 0 && mapRef.current) {
+          try {
+            mapRef.current.animateToRegion(newRegion, 500);
+          } catch (err) {
+            console.log('Error animando mapa:', err);
+            ErrorLogger.logError({
+              module: "CustomMapView.animateToRegion",
+              errorType: "Map Animation Error",
+              message: err.message,
+              stacktrace: err.stack,
+              latitude,
+              longitude,
+            });
           }
+        }
+
+        if (riskZones && Array.isArray(riskZones) && riskZones.length > 0) {
+          const insideZones = APIService.checkInsideRiskZones(latitude, longitude, riskZones);
           
-          previousZoneRef.current = currentZone;
-        } else {
-          setInsideZone(null);
-          previousZoneRef.current = null;
+          if (insideZones && insideZones.length > 0) {
+            const currentZone = insideZones[0];
+            setInsideZone(currentZone);
+            
+            const zoneId = `${currentZone.latitude}-${currentZone.longitude}`;
+            const prevZoneId = previousZoneRef.current ? 
+              `${previousZoneRef.current.latitude}-${previousZoneRef.current.longitude}` : null;
+            
+            if (zoneId !== prevZoneId && onInsideZone) {
+              onInsideZone(currentZone);
+            }
+            
+            previousZoneRef.current = currentZone;
+          } else {
+            setInsideZone(null);
+            previousZoneRef.current = null;
+          }
         }
       }
+    } catch (error) {
+      console.error('🔴 Error en CustomMapView.useEffect:', error);
+      ErrorLogger.logError({
+        module: "CustomMapView.useEffect",
+        errorType: "Map Update Error",
+        message: error.message,
+        stacktrace: error.stack,
+        latitude,
+        longitude,
+      });
     }
-  }, [latitude, longitude, riskZones]);
+  }, [latitude, longitude, riskZones, onInsideZone]);
 
   if (!latitude || !longitude || !region) {
     return (
@@ -426,33 +701,49 @@ function CustomMapView({ location, riskZones, onInsideZone }) {
         pitchEnabled={false}
         rotateEnabled={false}
         loadingEnabled={false}
+        onError={(error) => {
+          console.error('🔴 MapView Error:', error);
+          ErrorLogger.logError({
+            module: "MapView.onError",
+            errorType: "Map Render Error",
+            message: JSON.stringify(error),
+            stacktrace: "",
+            latitude,
+            longitude,
+          });
+        }}
       >
-        {/* Zonas de riesgo con markers de porcentaje */}
-        {riskZones && riskZones.map((zone, index) => (
-          <React.Fragment key={`zone-${index}`}>
-            <Circle
-              center={{ latitude: zone.latitude, longitude: zone.longitude }}
-              radius={zone.radius || 100}
-              fillColor={getRiskColor(zone.risk_score) + '30'}
-              strokeColor={getRiskColor(zone.risk_score)}
-              strokeWidth={2}
-            />
-            <Marker
-              coordinate={{ latitude: zone.latitude, longitude: zone.longitude }}
-              anchor={{ x: 0.5, y: 0.5 }}
-              tracksViewChanges={false}
-            >
-              <View style={[styles.riskMarker, { backgroundColor: getRiskColor(zone.risk_score) }]}>
-                <Ionicons name="warning" size={14} color="#FFF" />
-                <Text style={styles.riskMarkerText}>
-                  {(zone.risk_score * 100).toFixed(0)}%
-                </Text>
-              </View>
-            </Marker>
-          </React.Fragment>
-        ))}
+        {riskZones && Array.isArray(riskZones) && riskZones.map((zone, index) => {
+          try {
+            return (
+              <React.Fragment key={`zone-${index}`}>
+                <Circle
+                  center={{ latitude: zone.latitude, longitude: zone.longitude }}
+                  radius={zone.radius || 100}
+                  fillColor={getRiskColor(zone.risk_score) + '30'}
+                  strokeColor={getRiskColor(zone.risk_score)}
+                  strokeWidth={2}
+                />
+                <Marker
+                  coordinate={{ latitude: zone.latitude, longitude: zone.longitude }}
+                  anchor={{ x: 0.5, y: 0.5 }}
+                  tracksViewChanges={false}
+                >
+                  <View style={[styles.riskMarker, { backgroundColor: getRiskColor(zone.risk_score) }]}>
+                    <Ionicons name="warning" size={14} color="#FFF" />
+                    <Text style={styles.riskMarkerText}>
+                      {(zone.risk_score * 100).toFixed(0)}%
+                    </Text>
+                  </View>
+                </Marker>
+              </React.Fragment>
+            );
+          } catch (error) {
+            console.error('🔴 Error renderizando zona:', error);
+            return null;
+          }
+        })}
 
-        {/* Tu ubicación - Camión/Carro */}
         <Marker
           coordinate={{ latitude, longitude }}
           title="Tu ubicación"
@@ -469,7 +760,6 @@ function CustomMapView({ location, riskZones, onInsideZone }) {
           </View>
         </Marker>
 
-        {/* Círculo alrededor tuyo */}
         <Circle
           center={{ latitude, longitude }}
           radius={30}
@@ -479,7 +769,6 @@ function CustomMapView({ location, riskZones, onInsideZone }) {
         />
       </MapView>
 
-      {/* 🚨 BANNER COMPLETO CUANDO ESTÁS DENTRO */}
       {insideZone && (
         <View style={[styles.insideBanner, { backgroundColor: getRiskColor(insideZone.risk_score) }]}>
           <Ionicons name="warning" size={22} color="#FFF" />
@@ -499,7 +788,6 @@ function CustomMapView({ location, riskZones, onInsideZone }) {
         </View>
       )}
 
-      {/* Leyenda */}
       <View style={styles.legend}>
         <Text style={styles.legendTitle}>Zonas de Riesgo</Text>
         <View style={styles.legendItem}>
@@ -525,6 +813,7 @@ function MapScreen() {
   const [location, setLocation] = useState(null);
   const [riskZones, setRiskZones] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [settings, setSettings] = useState({
     notificationsEnabled: true,
     edad: 30,
@@ -535,132 +824,277 @@ function MapScreen() {
   });
   const [isInRiskZone, setIsInRiskZone] = useState(false);
   const lastNotificationRef = useRef(0);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
-    loadSettings();
-    loadRiskZones();
-    initializeTracking();
+    console.log('🟢 MapScreen montado');
+    mountedRef.current = true;
+    
+    const init = async () => {
+      try {
+        console.log('🟢 Iniciando carga de configuración...');
+        await loadSettings();
+        console.log('✅ Configuración cargada');
+        
+        console.log('🟢 Iniciando carga de zonas...');
+        await loadRiskZones();
+        console.log('✅ Zonas cargadas');
+        
+        console.log('🟢 Iniciando tracking GPS...');
+        await initializeTracking();
+        console.log('✅ Tracking iniciado');
+      } catch (error) {
+        console.error('🔴 Error en inicialización:', error);
+        ErrorLogger.logError({
+          module: "MapScreen.init",
+          errorType: "Initialization Error",
+          message: error.message,
+          stacktrace: error.stack,
+        });
+      }
+    };
+    
+    init();
 
     return () => {
+      console.log('🔴 MapScreen desmontado');
+      mountedRef.current = false;
       LocationService.stopTracking();
     };
   }, []);
 
   const loadSettings = async () => {
-    const saved = await StorageService.getSettings();
-    setSettings(saved);
+    try {
+      const saved = await StorageService.getSettings();
+      if (mountedRef.current) {
+        setSettings(saved);
+      }
+    } catch (err) {
+      console.error('Error cargando configuración:', err);
+      await ErrorLogger.logError({
+        module: "MapScreen.loadSettings",
+        errorType: "Settings Load Error",
+        message: err.message,
+        stacktrace: err.stack,
+      });
+    }
   };
 
   const loadRiskZones = async () => {
-      try {
-        const currentSettings = await StorageService.getSettings();
-        const maxZones = currentSettings.maxZones || null; // null = sin límite
-        
-        // Cargar desde caché primero
-        const cached = await StorageService.getRiskZones();
-        if (cached && cached.length > 0) {
-          // Aplicar límite del usuario
-          const limitedZones = maxZones ? cached.slice(0, maxZones) : cached;
-          setRiskZones(limitedZones);
-        }
+    try {
+      console.log('🟡 loadRiskZones: Iniciando...');
+      const currentSettings = await StorageService.getSettings();
+      console.log('🟡 loadRiskZones: Settings obtenidos', currentSettings);
+      
+      const maxZones = currentSettings.maxZones || null;
+      
+      const cached = await StorageService.getRiskZones();
+      console.log('🟡 loadRiskZones: Zonas en caché:', cached ? cached.length : 0);
+      
+      if (cached && cached.length > 0 && mountedRef.current) {
+        const limitedZones = maxZones ? cached.slice(0, maxZones) : cached;
+        console.log('🟡 loadRiskZones: Aplicando zonas en caché:', limitedZones.length);
+        setRiskZones(limitedZones);
+      }
 
-        // Cargar desde API con el límite configurado
-        const zones = await APIService.getRiskZones(
-          currentSettings.minRiskLevel,
-          currentSettings.minAccidents,
-          maxZones, // Usar el límite del usuario
-          currentSettings.sortBy
-        );
-        
+      console.log('🟡 loadRiskZones: Obteniendo zonas de API...');
+      const zones = await APIService.getRiskZones(
+        currentSettings.minRiskLevel,
+        currentSettings.minAccidents,
+        maxZones,
+        currentSettings.sortBy
+      );
+      
+      console.log('🟡 loadRiskZones: Zonas obtenidas de API:', zones.length);
+      
+      if (mountedRef.current) {
         setRiskZones(zones);
         await StorageService.saveRiskZones(zones);
-        
-      } catch (error) {
-        console.error('Error al cargar zonas:', error);
+        console.log('✅ loadRiskZones: Completado');
       }
-    };
-
+    } catch (error) {
+      console.error('🔴 loadRiskZones: Error:', error);
+      await ErrorLogger.logError({
+        module: "MapScreen.loadRiskZones",
+        errorType: "Risk Zones Load Error",
+        message: error.message,
+        stacktrace: error.stack,
+      });
+      if (mountedRef.current) {
+        setError('Error cargando zonas de riesgo');
+      }
+    }
+  };
 
   const initializeTracking = async () => {
     try {
+      console.log('🟡 initializeTracking: Iniciando...');
+      let success = false;
+      
       if (DEMO_MODE) {
-        LocationService.startDemoTracking(handleLocationUpdate);
+        console.log('🟡 initializeTracking: Modo DEMO activado');
+        success = LocationService.startDemoTracking(handleLocationUpdate);
       } else {
-        await LocationService.startRealTimeTracking(handleLocationUpdate);
+        console.log('🟡 initializeTracking: Iniciando GPS real...');
+        success = await LocationService.startRealTimeTracking(
+          handleLocationUpdate,
+          handleLocationError
+        );
+      }
+
+      console.log('🟡 initializeTracking: Success =', success);
+
+      if (!success && mountedRef.current) {
+        console.log('⚠️ initializeTracking: Falló');
+        setLoading(false);
+        setError('No se pudo iniciar el GPS');
       }
     } catch (error) {
-      Alert.alert('Error', 'No se pudo iniciar el seguimiento');
-      setLoading(false);
+      console.error('🔴 initializeTracking: Error:', error);
+      await ErrorLogger.logError({
+        module: "MapScreen.initializeTracking",
+        errorType: "Tracking Initialization Error",
+        message: error.message,
+        stacktrace: error.stack,
+      });
+      if (mountedRef.current) {
+        setError('Error al iniciar el seguimiento GPS');
+        setLoading(false);
+      }
     }
   };
 
   const handleLocationUpdate = (newLocation) => {
-    setLocation(newLocation);
-    setLoading(false);
+    try {
+      console.log('📍 Ubicación actualizada:', newLocation.coords.latitude, newLocation.coords.longitude);
+      if (mountedRef.current) {
+        setLocation(newLocation);
+        setLoading(false);
+        setError(null);
+      }
+    } catch (error) {
+      console.error('🔴 handleLocationUpdate: Error:', error);
+      ErrorLogger.logError({
+        module: "MapScreen.handleLocationUpdate",
+        errorType: "Location Update Handler Error",
+        message: error.message,
+        stacktrace: error.stack,
+        latitude: newLocation?.coords?.latitude,
+        longitude: newLocation?.coords?.longitude,
+      });
+    }
   };
 
-  // 🚨 NOTIFICAR CUANDO ENTRAS A UNA ZONA
-  const handleInsideZone = async (zone) => {
-    if (!settings.notificationsEnabled) return;
-
-    setIsInRiskZone(true);
-
-    // Cooldown de 3 minutos para evitar spam
-    const now = Date.now();
-    if (now - lastNotificationRef.current < 180000) {
-      return;
-    }
-
-    lastNotificationRef.current = now;
-
-    // Enviar notificación
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title: '🚨 ¡ALERTA DE RIESGO!',
-        body: `Entraste a zona de riesgo ${zone.risk_level} (${(zone.risk_score * 100).toFixed(0)}%). ${zone.accident_count ? `${zone.accident_count} accidentes históricos.` : ''} ¡Precaución!`,
-        sound: true,
-        priority: 'high',
-        data: { zone },
-      },
-      trigger: null,
-    });
-
-    // Guardar en historial
-    const alert = {
-      id: Date.now().toString(),
-      timestamp: new Date().toISOString(),
-      latitude: zone.latitude,
-      longitude: zone.longitude,
-      riskLevel: zone.risk_level,
-      probability: zone.risk_score,
-      mensaje: `🚨 Entrada a zona ${zone.risk_level}`,
-      accident_count: zone.accident_count
-    };
-
-    // 🚀 Registrar alerta en Google Sheets
+  const handleLocationError = (errorMsg) => {
     try {
-      const SHEETS_URL = "https://script.google.com/macros/s/AKfycbzzIyr0xEd51TFpWEXECmqYxUNLRYIgzmIbkDwr_ncsBoezc9qrRMLgZJxmxjUKjudW/exec"; // tu URL del paso 2
-      await fetch(SHEETS_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(alert),
+      if (mountedRef.current) {
+        setError(errorMsg);
+        setLoading(false);
+        Alert.alert(
+          'Error de GPS',
+          errorMsg + '\n\n¿Deseas activar el modo demo?',
+          [
+            { text: 'Reintentar', onPress: () => initializeTracking() },
+            { text: 'Modo Demo', onPress: () => {
+              LocationService.startDemoTracking(handleLocationUpdate);
+            }},
+          ]
+        );
+      }
+    } catch (error) {
+      ErrorLogger.logError({
+        module: "MapScreen.handleLocationError",
+        errorType: "Location Error Handler Error",
+        message: error.message,
+        stacktrace: error.stack,
       });
-    } catch (err) {
-      console.error("Error enviando a Sheets:", err);
     }
+  };
 
-    await StorageService.saveAlert(alert);
+  const handleInsideZone = async (zone) => {
+    try {
+      if (!settings.notificationsEnabled) return;
 
+      setIsInRiskZone(true);
 
+      const now = Date.now();
+      if (now - lastNotificationRef.current < 180000) {
+        return;
+      }
 
+      lastNotificationRef.current = now;
 
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: '🚨 ¡ALERTA DE RIESGO!',
+          body: `Entraste a zona de riesgo ${zone.risk_level} (${(zone.risk_score * 100).toFixed(0)}%). ${zone.accident_count ? `${zone.accident_count} accidentes históricos.` : ''} ¡Precaución!`,
+          sound: true,
+          priority: 'high',
+          data: { zone },
+        },
+        trigger: null,
+      });
+
+      const alert = {
+        id: Date.now().toString(),
+        timestamp: new Date().toISOString(),
+        latitude: zone.latitude,
+        longitude: zone.longitude,
+        riskLevel: zone.risk_level,
+        probability: zone.risk_score,
+        mensaje: `🚨 Entrada a zona ${zone.risk_level}`,
+        accident_count: zone.accident_count
+      };
+
+      try {
+        const SHEETS_URL = "https://script.google.com/macros/s/AKfycbzzIyr0xEd51TFpWEXECmqYxUNLRYIgzmIbkDwr_ncsBoezc9qrRMLgZJxmxjUKjudW/exec";
+        await fetch(SHEETS_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(alert),
+        });
+      } catch (err) {
+        console.log("Error enviando a Sheets:", err);
+        await ErrorLogger.logError({
+          module: "MapScreen.handleInsideZone",
+          errorType: "Sheets Alert Error",
+          message: err.message,
+          stacktrace: err.stack,
+          endpoint: "Google Sheets Alerts",
+          latitude: zone.latitude,
+          longitude: zone.longitude,
+        });
+      }
+
+      await StorageService.saveAlert(alert);
+    } catch (err) {
+      console.error('Error manejando zona:', err);
+      await ErrorLogger.logError({
+        module: "MapScreen.handleInsideZone",
+        errorType: "Zone Handler Error",
+        message: err.message,
+        stacktrace: err.stack,
+        latitude: zone?.latitude,
+        longitude: zone?.longitude,
+      });
+    }
   };
 
   const refreshZones = async () => {
-    setLoading(true);
-    await loadSettings();
-    await loadRiskZones();
-    setLoading(false);
+    try {
+      setLoading(true);
+      await loadSettings();
+      await loadRiskZones();
+      setLoading(false);
+    } catch (error) {
+      ErrorLogger.logError({
+        module: "MapScreen.refreshZones",
+        errorType: "Refresh Error",
+        message: error.message,
+        stacktrace: error.stack,
+      });
+      setLoading(false);
+    }
   };
 
   if (loading) {
@@ -668,6 +1102,21 @@ function MapScreen() {
       <View style={styles.loadingContainer}>
         <Ionicons name="location" size={60} color="#FF6B6B" />
         <Text style={styles.loadingText}>Iniciando GPS...</Text>
+        {error && (
+          <Text style={styles.errorText}>{error}</Text>
+        )}
+      </View>
+    );
+  }
+
+  if (error && !location) {
+    return (
+      <View style={styles.loadingContainer}>
+        <Ionicons name="warning" size={60} color="#F44336" />
+        <Text style={styles.errorText}>{error}</Text>
+        <TouchableOpacity style={styles.retryBtn} onPress={initializeTracking}>
+          <Text style={styles.retryText}>Reintentar</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -688,7 +1137,6 @@ function MapScreen() {
       )}
 
       <View style={styles.infoPanel}>
-        {/* Estado en tiempo real */}
         <View style={styles.statusIndicator}>
           <View style={[styles.statusDot, { 
             backgroundColor: isInRiskZone ? '#F44336' : '#4CAF50' 
@@ -747,26 +1195,53 @@ function AlertsScreen() {
   }, []);
 
   const loadAlerts = async () => {
-    const saved = await StorageService.getAlerts();
-    setAlerts(saved);
+    try {
+      const saved = await StorageService.getAlerts();
+      setAlerts(saved);
+    } catch (error) {
+      ErrorLogger.logError({
+        module: "AlertsScreen.loadAlerts",
+        errorType: "Alerts Load Error",
+        message: error.message,
+        stacktrace: error.stack,
+      });
+    }
   };
 
   const clearAll = () => {
-    Alert.alert(
-      'Confirmar',
-      '¿Eliminar todo el historial?',
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        {
-          text: 'Eliminar',
-          style: 'destructive',
-          onPress: async () => {
-            await StorageService.clearAlerts();
-            setAlerts([]);
+    try {
+      Alert.alert(
+        'Confirmar',
+        '¿Eliminar todo el historial?',
+        [
+          { text: 'Cancelar', style: 'cancel' },
+          {
+            text: 'Eliminar',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                await StorageService.clearAlerts();
+                setAlerts([]);
+              } catch (error) {
+                ErrorLogger.logError({
+                  module: "AlertsScreen.clearAll",
+                  errorType: "Clear Alerts Error",
+                  message: error.message,
+                  stacktrace: error.stack,
+                });
+              }
+            },
           },
-        },
-      ]
-    );
+        ]
+      );
+    } catch (error) {
+      ErrorLogger.logError({
+        module: "AlertsScreen.clearAll",
+        errorType: "Alert Dialog Error",
+        message: error.message,
+        stacktrace: error.stack,
+      });
+    }
   };
 
   const getRiskColor = (level) => {
@@ -863,25 +1338,54 @@ function SettingsScreen() {
   }, []);
 
   const loadSettings = async () => {
-    const saved = await StorageService.getSettings();
-    setSettings(saved);
+    try {
+      const saved = await StorageService.getSettings();
+      setSettings(saved);
+    } catch (error) {
+      ErrorLogger.logError({
+        module: "SettingsScreen.loadSettings",
+        errorType: "Settings Load Error",
+        message: error.message,
+        stacktrace: error.stack,
+      });
+    }
   };
 
   const updateSetting = async (key, value) => {
-    const newSettings = { ...settings, [key]: value };
-    setSettings(newSettings);
-    await StorageService.saveSettings(newSettings);
+    try {
+      const newSettings = { ...settings, [key]: value };
+      setSettings(newSettings);
+      await StorageService.saveSettings(newSettings);
+    } catch (error) {
+      ErrorLogger.logError({
+        module: "SettingsScreen.updateSetting",
+        errorType: "Settings Update Error",
+        message: error.message,
+        stacktrace: error.stack,
+        additionalData: { key, value }
+      });
+    }
   };
 
   const testNotification = async () => {
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title: '🚨 Prueba de Alerta',
-        body: 'Esta es una notificación de prueba. Sistema funcionando correctamente.',
-        sound: true,
-      },
-      trigger: null,
-    });
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: '🚨 Prueba de Alerta',
+          body: 'Esta es una notificación de prueba. Sistema funcionando correctamente.',
+          sound: true,
+        },
+        trigger: null,
+      });
+    } catch (err) {
+      Alert.alert('Error', 'No se pudo enviar la notificación');
+      await ErrorLogger.logError({
+        module: "SettingsScreen.testNotification",
+        errorType: "Notification Test Error",
+        message: err.message,
+        stacktrace: err.stack,
+      });
+    }
   };
 
   const riskLevels = [
@@ -899,7 +1403,6 @@ function SettingsScreen() {
     <SafeAreaView style={styles.container}>
       <ScrollView style={styles.settings}>
         
-        {/* Usuario */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>👤 Usuario</Text>
           
@@ -909,9 +1412,18 @@ function SettingsScreen() {
               style={styles.ageInput}
               value={settings.edad.toString()}
               onChangeText={(text) => {
-                const edad = parseInt(text) || 0;
-                if (edad >= 0 && edad <= 120) {
-                  updateSetting('edad', edad);
+                try {
+                  const edad = parseInt(text) || 0;
+                  if (edad >= 0 && edad <= 120) {
+                    updateSetting('edad', edad);
+                  }
+                } catch (error) {
+                  ErrorLogger.logError({
+                    module: "SettingsScreen.ageInput",
+                    errorType: "Input Error",
+                    message: error.message,
+                    stacktrace: error.stack,
+                  });
                 }
               }}
               keyboardType="numeric"
@@ -920,7 +1432,6 @@ function SettingsScreen() {
           </View>
         </View>
 
-        {/* Zonas de Riesgo */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>🗺️ Zonas de Riesgo</Text>
           
@@ -989,7 +1500,6 @@ function SettingsScreen() {
           </View>
         </View>
 
-        {/* Notificaciones */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>🔔 Notificaciones</Text>
           
@@ -1009,7 +1519,6 @@ function SettingsScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Info */}
         <View style={styles.infoBox}>
           <Ionicons name="information-circle" size={22} color="#2196F3" />
           <Text style={styles.infoText}>
@@ -1019,12 +1528,11 @@ function SettingsScreen() {
         </View>
 
         <View style={styles.version}>
-          <Text style={styles.versionText}>Versión 3.0.0</Text>
-          <Text style={styles.versionSub}>Detección en tiempo real</Text>
+          <Text style={styles.versionText}>Versión 3.0.1</Text>
+          <Text style={styles.versionSub}>Detección en tiempo real optimizada</Text>
         </View>
       </ScrollView>
       
-      {/* Modal Nivel de Riesgo */}
       <Modal
         visible={showRiskModal}
         transparent={true}
@@ -1072,7 +1580,6 @@ function SettingsScreen() {
         </View>
       </Modal>
 
-      {/* Modal Mínimo Accidentes */}
       <Modal
         visible={showAccidentsModal}
         transparent={true}
@@ -1117,7 +1624,6 @@ function SettingsScreen() {
         </View>
       </Modal>
 
-      {/* Modal Límite Zonas */}
       <Modal
         visible={showZonesModal}
         transparent={true}
@@ -1170,15 +1676,53 @@ function SettingsScreen() {
 export default function App() {
   useEffect(() => {
     requestPermissions();
+    setupGlobalErrorHandler();
   }, []);
 
+  const setupGlobalErrorHandler = () => {
+    try {
+      // Capturar errores globales no manejados (solo si ErrorUtils existe)
+      if (typeof ErrorUtils !== 'undefined') {
+        const originalErrorHandler = ErrorUtils.getGlobalHandler();
+        
+        ErrorUtils.setGlobalHandler((error, isFatal) => {
+          console.error('🔴 Global Error:', error);
+          ErrorLogger.logError({
+            module: "Global Error Handler",
+            errorType: isFatal ? "Fatal Error" : "Runtime Error",
+            message: error.message || "Unknown global error",
+            stacktrace: error.stack || "",
+            additionalData: { isFatal }
+          });
+
+          // Llamar al handler original
+          if (originalErrorHandler) {
+            originalErrorHandler(error, isFatal);
+          }
+        });
+      }
+    } catch (error) {
+      console.error('Error configurando global handler:', error);
+    }
+  };
+
   const requestPermissions = async () => {
-    const { status } = await Notifications.requestPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert(
-        'Permisos de notificación',
-        'Activa las notificaciones para recibir alertas de riesgo'
-      );
+    try {
+      const { status } = await Notifications.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert(
+          'Permisos de notificación',
+          'Activa las notificaciones para recibir alertas de riesgo'
+        );
+      }
+    } catch (err) {
+      console.error('Error solicitando permisos:', err);
+      await ErrorLogger.logError({
+        module: "App.requestPermissions",
+        errorType: "Permission Request Error",
+        message: err.message,
+        stacktrace: err.stack,
+      });
     }
   };
 

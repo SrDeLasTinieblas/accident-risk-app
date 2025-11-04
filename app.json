@@ -19,9 +19,11 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.bytescode.alertapp",
       "infoPlist": {
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "Esta app necesita acceso a tu ubicación para monitorear riesgos de accidentes.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Esta app necesita acceso a tu ubicación para monitorear riesgos de accidentes en tiempo real.",
         "NSLocationWhenInUseUsageDescription": "Esta app necesita acceso a tu ubicación para monitorear riesgos de accidentes.",
-        "UIBackgroundModes": ["location"]
+        "UIBackgroundModes": [
+          "location"
+        ]
       }
     },
     "android": {
@@ -33,7 +35,10 @@
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
-        "ACCESS_BACKGROUND_LOCATION"
+        "FOREGROUND_SERVICE",
+        "POST_NOTIFICATIONS",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
       ]
     },
     "web": {
@@ -43,11 +48,16 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Permitir acceso a la ubicación para monitorear riesgos.",
-          "locationAlwaysPermission": "Permitir acceso a la ubicación en segundo plano para monitorear riesgos.",
-          "locationWhenInUsePermission": "Permitir acceso a la ubicación mientras usas la app."
+          "locationAlwaysAndWhenInUsePermission": "Esta app necesita acceso a tu ubicación para monitorear zonas de riesgo de accidentes en tiempo real y alertarte cuando entres a una zona peligrosa.",
+          "locationWhenInUsePermission": "Permitir acceso a la ubicación mientras usas la app para detectar zonas de riesgo.",
+          "isAndroidBackgroundLocationEnabled": false
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "e213dd60-1fea-486b-a40d-96a57b92f55f"
+      }
+    }
   }
 }
