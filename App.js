@@ -335,7 +335,7 @@ const APIService = {
       const response = await Promise.race([
         fetch(url),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Timeout API')), 10000)
+          setTimeout(() => reject(new Error('Timeout API')), 30000)
         )
       ]);
       
